@@ -17,24 +17,14 @@ builder.filter("isIn", function() {
     }
 
     return newObj;
-
-    /*
-    var newArray = [];
-
-    array.forEach(function(obj) {
-      if (isIn(obj, filterArray))
-        newArray.push(obj);
-    });
-
-    return newArray;
-    */
   };
 });
 
 builder.value("hosts", {
   "NICTA - GeoTopo250K": "http://envirohack.research.nicta.com.au/geotopo_250k",
   "NICTA - Admin Bounds": "http://envirohack.research.nicta.com.au/admin_bnds_abs",
-  "NICTA - FSDF": "http://envirohack.research.nicta.com.au/fsdf",
+  "NICTA - FSDF Administrative Units": "http://envirohack.research.nicta.com.au/fsdf",
+  "Atlas of Living Australia": "http://spatial.ala.org.au/geoserver/ALA",
 });
 
 builder.value("serviceTypes", [
@@ -44,14 +34,24 @@ builder.value("serviceTypes", [
 
 builder.controller("builder", ["$scope", "$http",
   "requestCapabilities", "processCapabilities",
-  "geoRequest", "geoImage", "geoFeatureInfo", "processFeatureInfo", "imageWidth",
+  "geoRequest", "geoCURL", "geoImage", "geoFeatureInfo", "processFeatureInfo",
+  "imageWidth", "imageHeight",
   "hosts", "serviceTypes",
-  function($scope, $http, requestCapabilities, processCapabilities, request, getImageURL, getFeatureInfo, processFeatureInfo, getImageWidth, hosts, serviceTypes) {
+  function($scope, $http,
+    requestCapabilities, processCapabilities,
+    request, getCURL, getImageURL, getFeatureInfo, processFeatureInfo,
+    getImageWidth, getImageHeight,
+    hosts, serviceTypes
+  ) {
+
     $scope.hosts = hosts;
     $scope.host = hosts["NICTA - Admin Bounds"];
 
     $scope.serviceTypes = serviceTypes;
     $scope.serviceType = serviceTypes[0];
+
+    $scope.manualEntry = false;
+    $scope.timeout = 3000; // 3 seconds
 
     // Default to Australian bounds
     $scope.bbox = {
@@ -61,8 +61,11 @@ builder.controller("builder", ["$scope", "$http",
       maxy: -9.142175976703609,
     };
 
-    $scope.width = 200;
-    $scope.height = 200;
+    $scope.image = {
+      width: 200,
+      height: 200,
+      proportional: true,
+    };
 
     $scope.featureLimit = 50;
 
@@ -70,13 +73,6 @@ builder.controller("builder", ["$scope", "$http",
     $scope.request = function() {
       return request($scope);
     };
-
-    // Update feature info when feature is changed
-    $scope.$watch('host', function() {
-      getFeatureInfo($scope).success(function(xml) {
-        $scope.featureInfo = processFeatureInfo(xml);
-      });
-    });
 
     // Initialize the Google map
     var map = initMap();
@@ -114,43 +110,65 @@ builder.controller("builder", ["$scope", "$http",
       }
     });
 
+    // Create curl text
+    $scope.CURL = function() {
+      return getCURL($scope);
+    }
 
     // Create a URL for the request
     $scope.url = function(override) {
       var req = request($scope);
-      return req.url + "?" + $.param(req.params);
+      return req.url + "?" + decodeURIComponent($.param(req.params));
     }
 
     // Create an image link for the request
-    $scope.image = function() {
+    $scope.imageURL = function() {
       getImageURL($scope, 200);
     };
 
     // Get the capabilities of the current WMS/WFS server selection
     function updateCapabilities(updated) {
       // Reset old features if there is a new host
-      if ($scope.host == updated) {
+      if (updated && $scope.host == updated) {
         $scope.features = undefined;
         $scope.feature = undefined;
+        $scope.featureList = undefined;
+        
+        $scope.requestTypes = undefined;
       }
 
       // Get the new capabilities
-      var req = request($scope);
+      if ($scope.host) {
+        requestCapabilities($scope).success(function(xml) {
+          // Apply capabilities to the scope
+          var cap = processCapabilities($scope.serviceType, xml);
+          angular.extend($scope, cap);
+          $scope.capabilitiesError = null;
+        }).error(function(error) {
+          $scope.capabilitiesError = error? error : "Unable to retrieve the server's capabilities.";
 
-      requestCapabilities(req).success(function(xml) {
-        // Apply capabilities to the scope
-        var cap = processCapabilities($scope.serviceType, xml);
-        angular.extend($scope, cap);
-      });
+        });
+      }
     };
-
     // Update capabilities if the host or service type changes
     $scope.$watch('host', updateCapabilities);
     $scope.$watch('serviceType', updateCapabilities);
 
+    // Update the list of properties for the features of this service
+    function updateFeatureProperties() {
+      getFeatureInfo($scope).success(function(xml) {
+        $scope.featureInfo = processFeatureInfo(xml);
+        $scope.capabilitiesError = null;
+      }).error(function(error) {
+        $scope.capabilitiesError = error? error: "Unable to retreive the feature's properties";
+      });
+    }
+    $scope.$watch('host', updateFeatureProperties);
+    $scope.$watch('serviceType', updateFeatureProperties);
+
     // Update the bounding box based on the layer/feature selection
     function updateBBox(feature) {
-      if (feature) {
+      if (feature && $scope.updateBbox) {
         var bbox = $scope.featureList[feature].bbox;
         $scope.bbox = bbox;
       }
@@ -170,11 +188,38 @@ builder.controller("builder", ["$scope", "$http",
       }
     });
     
-    // Update the width when the bbox changes
-    function updateImageWidth(bbox) {
-      $scope.width = getImageWidth($scope.bbox, $scope.height);
+    // Update the width when the height or bbox changes
+    // Update the height when the width changes
+    function updateImageDimensions(newimg, oldimg) {
+      newimg = angular.copy(newimg); // avoid changing the newimg data
+
+      if (oldimg && $scope.image.proportional && !$scope.autoResizing) {
+        var bboxChanged = newimg.width === undefined;
+        var propChanged = newimg.proportional !== oldimg.proportional;
+
+        // Update height if width changed or bbox is changed or propotionality changed
+        if (bboxChanged || propChanged || newimg.width !== oldimg.width)
+          $scope.image.height = getImageHeight($scope.bbox, $scope.image.width);
+
+        // Update width if height changed
+        if (newimg.height !== oldimg.height)
+          $scope.image.width = getImageWidth($scope.bbox, $scope.image.height);
+
+        $scope.autoResizing = true;  // stop the next update
+      } else {
+        $scope.autoResizing = false; // this update doesn't do anything, but the next update will
+      }
     }
-    $scope.$watch('bbox', updateImageWidth);
+    $scope.$watch('image', updateImageDimensions, true);
+    $scope.$watch('bbox', updateImageDimensions);
+
+    // Update whether to include a feature's properties
+    $scope.includeProperties = function(feature, include) {
+      for (var p in feature) {
+        var prop = feature[p];
+        prop.include = include;
+      }
+    };
   }]);
 
 function initMap() {

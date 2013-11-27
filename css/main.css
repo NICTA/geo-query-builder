@@ -27,6 +27,18 @@ form, .container > div {
   height: 300px;
 }
 
+#wms-layers {
+  height: 200px;
+}
+
+#ecql-filter {
+  height: 120px;
+}
+
+#preview > .row > * {
+  text-align: center;
+}
+
 #preview > .row {
   padding-left: 15px;
 }
@@ -38,6 +50,10 @@ form, .container > div {
 
 #preview-image > img {
   margin: auto;
+}
+
+a#result-url {
+  word-wrap:break-word;
 }
 
 .glyphicon {

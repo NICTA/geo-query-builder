@@ -22,14 +22,38 @@ builderRequest.service("geoRequest", function() {
 
     if (data.service == "WMS" && data.request != "GetCapabilities") {
       data.layers = params.features ? params.features.join() : undefined;
-      data.width = params.width;
-      data.height = params.height;
+      data.width = params.image? params.image.width : 0;
+      data.height = params.image? params.image.height : 0;
       data.format = params.format;
     }
     if (data.service == "WFS" && data.request != "GetCapabilities") {
       data.typeName = params.feature;
-      data.maxFeatures = params.featureLimit;
+      if (/^1/.test(params.version)) // version 1 and 2 differ in feature limit paramater names
+        data.maxFeatures = params.featureLimit;
+      else
+        data.count = params.featureLimit;
       data.outputFormat = params.format;
+      data.version = params.version;
+    }
+
+    // Get a list of properties to include
+    if (params.featureInfo) {
+      var props = [], numProperties = 0;
+
+      // Get the properties of each feature
+      for (var f in params.features) {
+        var feature = params.features[f];
+        var properties = params.featureInfo[feature];
+        for (var p in properties) {
+          var prop = properties[p];
+          numProperties++;
+          if (prop.include)
+            props.push(prop.name);
+        }
+      }
+
+      if (numProperties != props.length && numProperties != 0)
+        data.propertyName = props.join(',');
     }
 
     var request = {
@@ -37,11 +61,28 @@ builderRequest.service("geoRequest", function() {
       headers: {},
       url: params.host + "/ows",
       params: data,
+      timeout: params.timeout,
     };
 
     return request;
   };
 });
+
+/* Produce an angular JSON request object
+   for requesting data from WMS/WFS servers */
+builderRequest.service("geoCURL", ["geoRequest", function(geoRequest) {
+  return function(params) {
+    var req = geoRequest(params);
+    var curl = "curl " + req.url + " --get";
+
+    for (var key in req.params) {
+      curl += " -d ";
+      curl += JSON.stringify(key + "=" + req.params[key]);
+    }
+
+    return curl;
+  };
+}]);
 
 /* Produce a URI for the source of an image
    This image is produced from a WMS request */
@@ -57,8 +98,10 @@ builderRequest.service('geoImage', ['geoRequest', 'imageWidth', function(request
         requestType: "GetMap",
         outputFormat: "image/png",
         format: "image/png",
-        width: getImageWidth(params.bbox, height),
-        height: height,
+        image: {
+          width: getImageWidth(params.bbox, height),
+          height: height,
+        },
         features: (typeof(params.features) == typeof([]))? params.features : [params.features],
         bbox: params.bbox,
         cql_filter: params.cql_filter,
@@ -109,7 +152,7 @@ builderRequest.service('processFeatureInfo', [function() {
         var prop = $(this);
         var name = prop.attr("name");
         var type = prop.attr("type");
-        f[name] = {name: name, type: type};
+        f[name] = {name: name, type: type, include: true};
       });
       
     });
